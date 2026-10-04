@@ -22,7 +22,9 @@ import {
   onDockPrefsChanged,
   writeDockPrefs,
   type DockPrefs,
+  type DockPercentMode,
 } from './lib/dockPrefs'
+import { dockPercent, dockWindows } from './lib/dockWindows'
 import {
   EMPTY_GLANCE,
   compactTokens,
@@ -54,7 +56,6 @@ import {
   gaugePath,
   glanceMetrics,
   glanceSeverity,
-  headlineWindow,
   isVertical,
   opposite,
   pct,
@@ -97,6 +98,33 @@ type Provider = {
   baseId?: string
   today?: ProfileToday
   caption?: string
+}
+
+/// Gauge identity is separate from provider identity: both quota windows can stay visible
+/// while settings, connection actions and sessions still address their original provider.
+type GaugeRow = {
+  id: string
+  provider: Provider
+  window: QuotaWindow | null
+  caption?: string
+}
+
+function gaugeRows(provider: Provider, prefs: DockPrefs): GaugeRow[] {
+  const baseId = provider.baseId ?? provider.id
+  const mode = prefs.glanceWindows[baseId] ?? 'billing'
+  const windows = dockWindows(provider.windows, mode)
+  if (windows.length === 0) return [{ id: provider.id, provider, window: null, caption: provider.caption }]
+  return windows.map(window => {
+    const period = provider.windows.length > 1 || baseId === 'codex' || mode !== 'billing'
+      ? displayLabel(window.label)
+      : null
+    return {
+      id: `${provider.id}:${window.label.toLowerCase()}`,
+      provider,
+      window,
+      caption: [provider.caption, period].filter(Boolean).join(' · ') || undefined,
+    }
+  })
 }
 
 /// A profile row is a Provider carrying a baseId that is not its own id.
@@ -197,7 +225,7 @@ const RING_COLORS: Record<Severity, string> = {
   danger: '#FF453A',
 }
 
-function Ring({ m, shape, percent }: { m: Metrics; shape: GaugeShape; percent: number | null }) {
+function Ring({ m, shape, percent, used }: { m: Metrics; shape: GaugeShape; percent: number | null; used: number | null }) {
   const size = m.ringSize
   const stroke = m.ringStroke
   // Strokes are centred on the gauge path like SwiftUI's, so the box gets a margin for them.
@@ -223,7 +251,7 @@ function Ring({ m, shape, percent }: { m: Metrics; shape: GaugeShape; percent: n
         <path
           d={path}
           fill="none"
-          stroke={RING_COLORS[severity(percent)]}
+          stroke={RING_COLORS[severity(used ?? 0)]}
           strokeWidth={stroke}
           strokeLinecap="round"
           pathLength={100}
@@ -238,7 +266,8 @@ function Ring({ m, shape, percent }: { m: Metrics; shape: GaugeShape; percent: n
 type RowProps = {
   m: Metrics
   shape: GaugeShape
-  provider: Provider
+  row: GaugeRow
+  percentMode: DockPercentMode
   loading: boolean
   style: CSSProperties
   onEnter: () => void
@@ -246,10 +275,12 @@ type RowProps = {
   onClick: () => void
 }
 
-function Row({ m, shape, provider, loading, style, onEnter, onLeave, onClick }: RowProps) {
-  const headline = provider.available ? headlineWindow(provider.windows) : null
-  const percent = headline ? pct(headline.usedPct) : null
-  const sev = percent === null ? null : severity(percent)
+function Row({ m, shape, row, percentMode, loading, style, onEnter, onLeave, onClick }: RowProps) {
+  const { provider, window } = row
+  const used = provider.available && window ? pct(window.usedPct) : null
+  const percent = used === null || !window ? null : dockPercent(window.usedPct, percentMode)
+  const sev = used === null ? null : severity(used)
+  const label = `${provider.name}${window ? `, ${displayLabel(window.label)}` : ''}, ${percent === null ? 'usage unavailable' : `${percent}% ${percentMode === 'remaining' ? 'remaining' : 'used'}`}`
   return (
     <button
       type="button"
@@ -258,18 +289,18 @@ function Row({ m, shape, provider, loading, style, onEnter, onLeave, onClick }: 
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
       onClick={onClick}
-      aria-label={`${provider.name} usage`}
+      aria-label={label}
+      title={label}
     >
       <span className="dock-gauge">
-        <Ring m={m} shape={shape} percent={percent} />
+        <Ring m={m} shape={shape} percent={percent} used={used} />
         <span className={`dock-glyph${loading ? ' is-loading' : ''}`}>
           <ProviderGlyph id={provider.baseId ?? provider.id} size={m.providerIconSize} />
         </span>
         {provider.error ? <span className="dock-row-alert" /> : null}
       </span>
       <span className={`dock-pct${sev ? ` is-${sev}` : ' is-empty'}`}>{percent === null ? '--' : `${percent}%`}</span>
-      {/* Two Claude rings are told apart by their captions and nothing else. */}
-      {provider.caption ? <span className="dock-row-caption">{provider.caption}</span> : null}
+      {row.caption ? <span className="dock-row-caption">{row.caption}</span> : null}
     </button>
   )
 }
@@ -319,11 +350,13 @@ function instruction(provider: Provider, quota: QuotaState): string {
 function GaugeText({
   label,
   fraction,
+  usedFraction = fraction,
   lineHeight,
   className,
 }: {
   label: string
   fraction: number
+  usedFraction?: number
   lineHeight: number
   className: string
 }) {
@@ -334,7 +367,7 @@ function GaugeText({
       <span className="dock-gauge-run">
         <span className="dock-gauge-base">{label}</span>
         <span
-          className={`dock-gauge-fill is-${glanceSeverity(fraction)}`}
+          className={`dock-gauge-fill is-${glanceSeverity(usedFraction)}`}
           style={{ clipPath: gaugeClipPath(fraction, lineHeight) }}
           aria-hidden="true"
         >
@@ -395,6 +428,7 @@ function Detail({
   budget,
   loading,
   fetchedAt,
+  percentMode,
 }: {
   m: Metrics
   provider: Provider
@@ -403,6 +437,7 @@ function Detail({
   budget: number | null
   loading: boolean
   fetchedAt: number | null
+  percentMode: DockPercentMode
 }) {
   const g = glanceMetrics(m.detailScale)
   const now = Date.now()
@@ -500,16 +535,18 @@ function Detail({
             <div className="dock-window-row" style={{ textAlign: windowAlign }}>
               {windows.map((row) => {
                 const used = pct(row.usedPct)
+                const percent = dockPercent(row.usedPct, percentMode)
                 const resets = resetsIn(row.resetsAt)
                 return (
                   <div className="dock-window-col" key={`${provider.id}-${row.label}`}>
                     <GaugeText
                       className="dock-window-pct"
-                      label={`${used}%`}
-                      fraction={used / 100}
+                      label={`${percent}%`}
+                      fraction={percent / 100}
+                      usedFraction={used / 100}
                       lineHeight={g.windowPercent}
                     />
-                    <span className="dock-window-label">{displayLabel(row.label)}</span>
+                    <span className="dock-window-label">{displayLabel(row.label)} · {percentMode === 'remaining' ? 'left' : 'used'}</span>
                     <span className="dock-window-reset">{resets}</span>
                   </div>
                 )
@@ -655,7 +692,8 @@ export function Dock() {
   const phaseRef = useRef(detailPhase)
   phaseRef.current = detailPhase
   const pointerRef = useRef<PointerSnapshot>(NO_POINTER)
-  const orderedRef = useRef<Provider[]>([])
+  const pointedRowRef = useRef<string | null>(null)
+  const orderedRef = useRef<GaugeRow[]>([])
   const detailRef = useRef<HTMLDivElement>(null)
   const press = useRef<{ x: number; y: number; dragged: boolean } | null>(null)
   const suppressClick = useRef(false)
@@ -748,12 +786,14 @@ export function Dock() {
     windows: [],
   }
   const selected = available.length > 0 ? available : [preferred]
-  const displayed = presentationExpanded
+  const displayedProviders = presentationExpanded
     ? [preferred, ...selected.filter((p) => p.id !== preferred.id)]
     : [preferred]
-  // Profile rings carry a caption, and every row shares their taller pitch because the
-  // hit-test assumes a uniform one. Rails without a Claude ring keep today's height.
-  const captioned = separateProfiles && selected.some((p) => rowBase(p) === 'claude')
+  const selectedRows = selected.flatMap(provider => gaugeRows(provider, prefs))
+  const restRows = gaugeRows(preferred, prefs).length
+  const displayed = displayedProviders.flatMap(provider => gaugeRows(provider, prefs))
+  // Every period/profile caption shares a uniform pitch with the native hit-test.
+  const captioned = selectedRows.some(row => Boolean(row.caption))
   const rowExtent = m.rowHeight + (captioned ? m.captionGap + m.captionLine : 0)
   const anchor = frame?.anchor ?? 'start'
   const ordered = anchor === 'end' ? [...displayed].reverse() : displayed
@@ -803,6 +843,10 @@ export function Dock() {
     },
     [cancel, schedule]
   )
+
+  useEffect(() => {
+    if (hovered && !ordered.some(row => row.id === hovered)) hideDetail(false)
+  }, [hovered, ordered, hideDetail])
 
   const scheduleCollapse = useCallback(() => {
     schedule('collapse', MOTION.railHoverCloseDelay, () => {
@@ -874,15 +918,20 @@ export function Dock() {
       const rows = orderedRef.current
       if (next.detailHovered !== prev.detailHovered) detailHoverChanged(next.detailHovered)
       if (next.railHovered !== prev.railHovered) railHoverChanged(next.railHovered)
-      if (next.row !== prev.row) {
-        const before = prev.row === null ? null : rows[prev.row]
-        const after = next.row === null ? null : rows[next.row]
-        if (before) rowHoverChanged(before.id, false)
-        if (after) rowHoverChanged(after.id, true)
+      const before = pointedRowRef.current
+      const after = next.row === null ? null : rows[next.row]?.id ?? null
+      if (after !== before) {
+        pointedRowRef.current = after
+        if (before) rowHoverChanged(before, false)
+        if (after) rowHoverChanged(after, true)
       }
     },
     [detailHoverChanged, railHoverChanged, rowHoverChanged]
   )
+  // Native pointer events report row ordinals. A period/provider switch can change the
+  // gauge under a stationary cursor without changing its ordinal or emitting a new event.
+  const rowOrder = ordered.map(row => row.id).join('\0')
+  useEffect(() => applyPointer(pointerRef.current), [rowOrder, applyPointer])
   const nativePointer = frame?.nativePointer ?? false
   const domPointer = (patch: Partial<PointerSnapshot>) => {
     if (nativePointer) return
@@ -1016,7 +1065,8 @@ export function Dock() {
     press.current = null
   }
 
-  const onRowClick = (provider: Provider) => {
+  const onRowClick = (row: GaugeRow) => {
+    const { provider } = row
     if (interactionRef.current.dragging) return
     cancel('expand')
     cancel('collapse')
@@ -1028,7 +1078,7 @@ export function Dock() {
     } else {
       setInteraction((i) => ({ ...i, pinned: !i.pinned }))
     }
-    showDetail(provider.id)
+    showDetail(row.id)
   }
 
   // The bubble is laid out at its natural height first; its frame is computed from that.
@@ -1039,16 +1089,16 @@ export function Dock() {
     }
     const el = detailRef.current
     if (el) setDetailHeight(Math.ceil(el.offsetHeight))
-  }, [hovered, quota, glance, budget, m])
+  }, [hovered, quota, glance, budget, m, prefs.percentMode])
 
   const rows = ordered.length
-  const totalRows = Math.max(selected.length, 1)
+  const totalRows = Math.max(selectedRows.length, restRows)
   const detailRow = hovered ? ordered.findIndex((p) => p.id === hovered) : -1
   const detailRequest = hovered && detailHeight > 0 && detailRow >= 0 ? { row: detailRow, height: detailHeight } : null
   useEffect(() => {
     let stale = false
     void invoke<DockFrame>('dock_set_layout', {
-      request: { rows, totalRows, expanded: presentationExpanded, detail: detailRequest, captioned },
+      request: { rows, totalRows, restRows, expanded: presentationExpanded, detail: detailRequest, captioned },
     }).then((next) => {
       if (!stale) setFrame(next)
     })
@@ -1057,7 +1107,7 @@ export function Dock() {
     }
     // detailRequest is derived from the two scalars below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, totalRows, presentationExpanded, detailRow, detailHeight, m, captioned])
+  }, [rows, totalRows, restRows, presentationExpanded, detailRow, detailHeight, m, captioned])
 
   // Entering: the card is placed while invisible, then slides in on the next frame.
   const detailPlaced = frame?.detail != null && detailRequest != null
@@ -1096,11 +1146,11 @@ export function Dock() {
   const bubbleFill = bubbleGlass ? 'url(#dock-glass-fill)' : 'url(#dock-rail-fill)'
   const edge = flareEdge
   const vertical = railVertical
-  const cross = vertical ? m.railWidth : m.horizontalRailWidth
+  const cross = vertical ? m.railWidth : m.horizontalRailWidth + (captioned ? m.captionGap + m.captionLine : 0)
   const pad = alongPad(m, attachment)
   // The shape grows by the same caption allowance the rows and Rust's layout already carry.
   const rowM = captioned ? { ...m, rowHeight: rowExtent } : m
-  const restLength = railLength(rowM, 1, attachment)
+  const restLength = railLength(rowM, restRows, attachment)
   const targetLength = railLength(rowM, rows, attachment)
   const bodyLength = Math.round(restLength + (targetLength - restLength) * progress)
   const railRect = frame?.rail ?? { x: 0, y: 0, w: cross, h: restLength }
@@ -1127,7 +1177,7 @@ export function Dock() {
   // Tucked behind the edge before the entrance plays and again once the retract starts.
   const tucked = presence !== 'present'
 
-  const hoveredProvider = hovered ? (ordered.find((p) => p.id === hovered) ?? null) : null
+  const hoveredProvider = hovered ? (ordered.find(row => row.id === hovered)?.provider ?? null) : null
   const detailFrame = frame?.detail ?? null
   const tailEdge = opposite(frame?.bubbleSide ?? 'left')
   const detailW = m.detailWidth
@@ -1215,15 +1265,16 @@ export function Dock() {
           />
         </svg>
         <div className="dock-rows" style={rowsStyle}>
-          {ordered.map((provider, index) => {
-            const isPreferred = provider.id === preferred.id
+          {ordered.map((row, index) => {
+            const isPreferred = row.provider.id === preferred.id
             const reveal = isPreferred ? 0 : m.rowReveal * (1 - progress)
             return (
               <Row
-                key={provider.id}
+                key={row.id}
                 m={m}
                 shape={prefs.gaugeShape}
-                provider={provider}
+                row={row}
+                percentMode={prefs.percentMode}
                 loading={loading}
                 style={{
                   width: vertical ? cross - m.railCrossPad * 2 : rowExtent,
@@ -1233,7 +1284,7 @@ export function Dock() {
                 }}
                 onEnter={() => domPointer({ row: index })}
                 onLeave={() => domPointer({ row: null })}
-                onClick={() => onRowClick(provider)}
+                onClick={() => onRowClick(row)}
               />
             )
           })}
@@ -1268,6 +1319,7 @@ export function Dock() {
             budget={budget}
             loading={loading}
             fetchedAt={quota.fetchedAt}
+            percentMode={prefs.percentMode}
           />
         </div>
       ) : null}

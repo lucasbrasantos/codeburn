@@ -109,7 +109,9 @@
 }
 
 .dock-row:focus-visible {
-  outline: none;
+  outline: 1px solid var(--dock-text);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .dock-gauge {
@@ -166,9 +168,11 @@
 .dock-pct.is-critical { color: var(--dock-orange); }
 .dock-pct.is-danger { color: var(--dock-red); }
 
-/* A profile ring's config-directory name. Only profile rows render it. */
+/* Period labels and profile names share one line below the percentage. */
 .dock-row-caption {
-  margin-top: var(--dock-caption-gap);
+  /* The flex gap already separates the percentage and caption. */
+  margin-top: calc(var(--dock-caption-gap) - var(--dock-ring-gap));
+  flex-shrink: 0;
   font-size: var(--dock-caption-size);
   line-height: var(--dock-caption-line);
   height: var(--dock-caption-line);

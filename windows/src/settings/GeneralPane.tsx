@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
@@ -15,7 +15,7 @@ import { summaryFor, type QuotaState } from '../lib/quota'
 import {
   DEFAULT_DOCK_PREFS, DOCK_CLAUDE_PROFILES, DOCK_DETAIL_THEMES, DOCK_GAUGE_SHAPES, DOCK_SCALE_MAX, DOCK_SCALE_MIN, DOCK_SCALE_STEP,
   DOCK_THEMES, canDeselect, loadDockPrefs, manageableProviders, onDockPrefsChanged,
-  writeDockPrefs, type DockPrefs,
+  writeDockPrefs, type DockPercentMode, type DockPrefs, type DockWindowMode,
 } from '../lib/dockPrefs'
 import { ProviderGlyph } from '../providerIcons'
 import { TelemetryNotice } from '../components/TelemetryNotice'
@@ -369,12 +369,27 @@ function CapacityDockSection({ quota }: { quota: QuotaState }) {
       )}
       <Row
         label="Keep expanded"
-        hint="Every ring stays out. Off, the rail rests on one ring and opens when you hover it."
+        hint="Every selected provider stays visible. Off, the rail shows the resting provider's selected periods and opens when you hover it."
         control={
           <Switch
             ariaLabel="Keep the Capacity Dock expanded"
             on={prefs.keepExpanded}
             onToggle={() => apply({ keepExpanded: !prefs.keepExpanded })}
+          />
+        }
+      />
+      <Row
+        label="Quota percentage"
+        hint="Used shows how much you have consumed. Remaining shows how much is left before the limit is reached."
+        control={
+          <Select
+            ariaLabel="Capacity Dock quota percentage"
+            value={prefs.percentMode}
+            options={[
+              { id: 'used' as DockPercentMode, label: 'Used' },
+              { id: 'remaining' as DockPercentMode, label: 'Remaining' },
+            ]}
+            onChange={percentMode => apply({ percentMode })}
           />
         }
       />
@@ -448,25 +463,50 @@ function CapacityDockSection({ quota }: { quota: QuotaState }) {
       ) : (
         manageable.map(id => {
           const on = prefs.providers.length > 0 ? prefs.providers.includes(id) : isConnected(id)
+          const windows = quota.providers.find(provider => provider.id === id)?.windows ?? []
+          const hasPeriods = new Set(windows.map(window => window.label.trim().toLowerCase())).size > 1 ||
+            Object.hasOwn(prefs.glanceWindows, id)
+          const periods: Array<{ id: DockWindowMode; label: string }> = [
+            { id: 'billing', label: id === 'codex' ? 'Weekly' : 'Billing period' },
+            { id: 'burst', label: id === 'codex' ? '5 hours' : 'Short period' },
+            { id: 'both', label: 'Both' },
+          ]
           return (
-            <Row
-              key={id}
-              label={
-                <span className="stg-provider">
-                  <ProviderGlyph id={id} size={14} />
-                  <span>{nameOf(id)}</span>
-                  {!isConnected(id) && <span className="stg-attention">Needs attention</span>}
-                </span>
-              }
-              control={
-                <Switch
-                  ariaLabel={nameOf(id)}
-                  on={on}
-                  disabled={on && !canDeselect(id, prefs.providers.length > 0 ? prefs.providers : all.filter(isConnected), isConnected)}
-                  onToggle={() => toggleProvider(id, !on)}
+            <Fragment key={id}>
+              <Row
+                label={
+                  <span className="stg-provider">
+                    <ProviderGlyph id={id} size={14} />
+                    <span>{nameOf(id)}</span>
+                    {!isConnected(id) && <span className="stg-attention">Needs attention</span>}
+                  </span>
+                }
+                control={
+                  <Switch
+                    ariaLabel={nameOf(id)}
+                    on={on}
+                    disabled={on && !canDeselect(id, prefs.providers.length > 0 ? prefs.providers : all.filter(isConnected), isConnected)}
+                    onToggle={() => toggleProvider(id, !on)}
+                  />
+                }
+              />
+              {hasPeriods && (
+                <Row
+                  label={`${nameOf(id)} periods`}
+                  hint={id === 'codex'
+                    ? 'Show the weekly limit, the rolling 5-hour limit, or both together.'
+                    : 'Billing covers the weekly or monthly limit. Short covers the session, hourly or daily limit.'}
+                  control={
+                    <Select
+                      ariaLabel={`${nameOf(id)} quota periods`}
+                      value={prefs.glanceWindows[id] ?? 'billing'}
+                      options={periods}
+                      onChange={mode => apply({ glanceWindows: { ...prefs.glanceWindows, [id]: mode } })}
+                    />
+                  }
                 />
-              }
-            />
+              )}
+            </Fragment>
           )
         })
       )}

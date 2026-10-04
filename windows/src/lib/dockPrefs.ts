@@ -9,6 +9,10 @@ import { listen } from '@tauri-apps/api/event'
 
 export type DockTheme = 'graphite' | 'glass'
 export type DockGaugeShape = 'circle' | 'squircle'
+/// Which quota periods a provider shows in the rail.
+export type DockWindowMode = 'billing' | 'burst' | 'both'
+/// The same quota can be read as consumption or capacity still available.
+export type DockPercentMode = 'used' | 'remaining'
 /// How the rail draws Claude with more than one config directory.
 export type DockClaudeProfiles = 'combined' | 'separate'
 
@@ -64,6 +68,10 @@ export type DockPrefs = {
   keepExpanded: boolean
   /// One Claude ring, or one captioned ring per config directory.
   claudeProfiles: DockClaudeProfiles
+  /// Period selection by base provider id, shared by that provider's profiles.
+  glanceWindows: Record<string, DockWindowMode>
+  /// Applies to quota percentages in the rail and its hover bubble.
+  percentMode: DockPercentMode
 }
 
 export const DEFAULT_DOCK_PREFS: DockPrefs = {
@@ -77,10 +85,19 @@ export const DEFAULT_DOCK_PREFS: DockPrefs = {
   manualSelection: false,
   keepExpanded: false,
   claudeProfiles: 'combined',
+  glanceWindows: {},
+  percentMode: 'used',
 }
 
 export function parseDockPrefs(raw: Record<string, unknown>): DockPrefs {
   const scale = typeof raw.scale === 'number' && Number.isFinite(raw.scale) ? raw.scale : DOCK_SCALE_MIN
+  const storedWindows = raw.glanceWindows
+  const isWindowMap = storedWindows !== null && typeof storedWindows === 'object' &&
+    (Object.getPrototypeOf(storedWindows) === Object.prototype || Object.getPrototypeOf(storedWindows) === null)
+  const glanceWindows = Object.fromEntries(
+    (isWindowMap ? Object.entries(storedWindows) : []).filter((entry): entry is [string, DockWindowMode] =>
+      entry[0].length > 0 && (entry[1] === 'billing' || entry[1] === 'burst' || entry[1] === 'both')),
+  )
   return {
     enabled: raw.enabled === true,
     preferred: typeof raw.preferred === 'string' ? raw.preferred : null,
@@ -92,6 +109,8 @@ export function parseDockPrefs(raw: Record<string, unknown>): DockPrefs {
     manualSelection: raw.manualSelection === true,
     keepExpanded: raw.keepExpanded === true,
     claudeProfiles: raw.claudeProfiles === 'separate' ? 'separate' : 'combined',
+    glanceWindows,
+    percentMode: raw.percentMode === 'remaining' ? 'remaining' : 'used',
   }
 }
 
